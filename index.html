@@ -300,6 +300,8 @@ a);requestAnimationFrame(function(){g(document.body)})})}var l=["material-icons"
                     playbackRate: 0.1, 
                     volume: -15
                 }).toDestination();
+                drone.autostart = true;
+                drone.start();
                 
                 // Block Event Synth
                 const blipSynth = new Tone.PolySynth(Tone.Synth, {
@@ -312,17 +314,29 @@ a);requestAnimationFrame(function(){g(document.body)})})}var l=["material-icons"
                 blipSynth.connect(reverb);
 
                 app.synth = blipSynth;
+                app.drone = drone;
+                updateAudioState();
             } catch(e) {
                 console.warn("Audio init failed:", e);
             }
         }
 
         function playBlockSound() {
-            if (!app.synth) return;
+            if (!app.synth || !app.audioEnabled) return;
             const notes = ["C6", "D6", "E6", "G6", "A6"];
             const note = notes[Math.floor(Math.random() * notes.length)];
             app.synth.triggerAttackRelease(note, "32n");
         }
+
+        function updateAudioState() {
+            const dest = Tone?.getDestination ? Tone.getDestination() : Tone.Destination;
+            if (dest) dest.mute = !app.audioEnabled;
+            if (els.audioToggle) {
+                els.audioToggle.classList.toggle('active', app.audioEnabled);
+                els.audioToggle.innerText = app.audioEnabled ? 'Audio: On' : 'Audio: Off';
+            }
+        }
+        function toggleAudio() { app.audioEnabled = !app.audioEnabled; updateAudioState(); }
 
         // --- WEBSOCKET LOGIC ---
         function connectWS(index = 0) {
@@ -347,10 +361,11 @@ a);requestAnimationFrame(function(){g(document.body)})})}var l=["material-icons"
 
             app.ws.onclose = () => {
                 setConnection(false);
+                log("Link lost. Cycling nodes...");
                 setTimeout(() => connectWS(index + 1), 2000);
             };
 
-            app.ws.onerror = (e) => console.error(e);
+            app.ws.onerror = (e) => { console.error(e); log("Node error detected."); };
         }
 
         function processBlock(header) {
@@ -423,16 +438,44 @@ a);requestAnimationFrame(function(){g(document.body)})})}var l=["material-icons"
         }
 
         function log(msg) {
+            const time = new Date().toLocaleTimeString();
+            const line = `[${time}] ${msg}`;
+            app.logLines.unshift(line);
+            app.logLines = app.logLines.slice(0, 6);
+
             els.log.innerText = `> ${msg}`;
             els.log.classList.remove('text-gray-300');
             els.log.classList.add('text-white');
             setTimeout(() => els.log.classList.replace('text-white', 'text-gray-300'), 200);
+
+            if (els.logList) {
+                els.logList.innerHTML = app.logLines.map(entry => `<li>${entry}</li>`).join('');
+            }
+        }
+
+        function manualReconnect() {
+            log("Manual reconnect requested.");
+            setConnection(false);
+            if (app.ws) {
+                try { app.ws.onclose = null; app.ws.close(); } catch(e) {}
+            }
+            connectWS();
+        }
+
+        function toggleMinimal() {
+            app.minimalMode = !app.minimalMode;
+            document.body.classList.toggle('calm', app.minimalMode);
+            if (els.minimalToggle) {
+                els.minimalToggle.classList.toggle('active', app.minimalMode);
+                els.minimalToggle.innerText = app.minimalMode ? 'Calm Mode: On' : 'Calm Mode: Off';
+            }
+            visualizer.dimmed = app.minimalMode;
         }
 
         // --- VISUALIZER ---
         const visualizer = {
             canvas: document.getElementById('visualizer-canvas'),
-            ctx: null, width: 0, height: 0, pulses: [], rotation: 0,
+            ctx: null, width: 0, height: 0, pulses: [], rotation: 0, dimmed: false,
             init() {
                 this.ctx = this.canvas.getContext('2d');
                 this.resize();
@@ -445,27 +488,29 @@ a);requestAnimationFrame(function(){g(document.body)})})}var l=["material-icons"
                 this.canvas.width = this.width;
                 this.canvas.height = this.height;
             },
-            triggerPulse() {
-                this.pulses.push({ r: 50, alpha: 1, width: 2 });
+            triggerPulse(intensity = 1) {
+                const scale = this.dimmed ? 0.6 : 1;
+                this.pulses.push({ r: 50 * scale, alpha: this.dimmed ? 0.6 : 1, width: 2 * scale * intensity });
             },
             animate() {
                 const ctx = this.ctx;
                 const cx = this.width / 2;
                 const cy = this.height / 2;
-                
-                ctx.fillStyle = 'rgba(10, 10, 10, 0.2)';
+
+                const bgAlpha = this.dimmed ? 0.08 : 0.2;
+                ctx.fillStyle = `rgba(10, 10, 10, ${bgAlpha})`;
                 ctx.fillRect(0, 0, this.width, this.height);
                 
-                this.rotation += 0.002;
+                this.rotation += this.dimmed ? 0.001 : 0.002;
                 
                 // Rings
-                ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+                ctx.strokeStyle = this.dimmed ? 'rgba(255, 255, 255, 0.06)' : 'rgba(255, 255, 255, 0.1)';
                 ctx.lineWidth = 1;
                 ctx.beginPath();
                 ctx.ellipse(cx, cy, 200, 200, this.rotation, 0, Math.PI * 2);
                 ctx.stroke();
 
-                ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+                ctx.strokeStyle = this.dimmed ? 'rgba(255, 255, 255, 0.04)' : 'rgba(255, 255, 255, 0.05)';
                 ctx.beginPath();
                 ctx.ellipse(cx, cy, 300, 300, -this.rotation * 0.5, 0, Math.PI * 2);
                 ctx.stroke();
@@ -473,8 +518,10 @@ a);requestAnimationFrame(function(){g(document.body)})})}var l=["material-icons"
                 // Pulses
                 for (let i = this.pulses.length - 1; i >= 0; i--) {
                     const p = this.pulses[i];
-                    p.r += 3;
-                    p.alpha -= 0.01;
+                    const grow = this.dimmed ? 1.5 : 3;
+                    const fade = this.dimmed ? 0.006 : 0.01;
+                    p.r += grow;
+                    p.alpha -= fade;
                     if (p.alpha <= 0) { this.pulses.splice(i, 1); continue; }
                     ctx.beginPath();
                     ctx.arc(cx, cy, p.r, 0, Math.PI * 2);
@@ -509,10 +556,15 @@ a);requestAnimationFrame(function(){g(document.body)})})}var l=["material-icons"
             document.getElementById('countdown-container').style.opacity = '1';
             els.targetDate.innerText = app.targetDate.toUTCString().replace('GMT', 'UTC');
 
+            updateAudioState();
             initAudio();
             visualizer.init();
             connectWS();
             setInterval(updateTimer, 1000);
+            setInterval(() => {
+                const connected = app.ws && app.ws.readyState === WebSocket.OPEN;
+                if (!connected) visualizer.triggerPulse(0.6);
+            }, 8000);
             updateTimer();
         }
 
